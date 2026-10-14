@@ -1,0 +1,10 @@
+{
+  "name": "erp-backend",
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch --env-file=.env src/main.js",
+    "start": "node --env-file=.env src/main.js",
+    "migrate": "node --env-file=.env src/adapters/out/postgres/migrate.js"
+  },
+  "dependencies": { "cors": "^2.8.5", "express": "^4.21.0", "pg": "^8.13.0" }
+}
