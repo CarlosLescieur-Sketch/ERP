@@ -8,13 +8,20 @@
   <body>
     <aside>
       <h1>ERP</h1>
-      <nav>
+      <nav id="nav">
         <a href="#resumen">Resumen</a>
         <a href="#productos">Inventario</a>
         <a href="#terceros">Clientes y proveedores</a>
         <a href="#compras">Compras</a>
         <a href="#ventas">Ventas</a>
+        <a href="#cotizaciones">Cotizaciones</a>
+        <a href="#usuarios" data-perm="users:manage" hidden>Usuarios</a>
       </nav>
+      <div id="whoami" hidden>
+        <span id="whoami-name"></span>
+        <span id="whoami-role"></span>
+        <button id="logout" class="ghost" type="button">Cerrar sesión</button>
+      </div>
     </aside>
     <main id="view"></main>
     <div id="toast" role="status"></div>

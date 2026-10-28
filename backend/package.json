@@ -4,7 +4,14 @@
   "scripts": {
     "dev": "node --watch --env-file=.env src/main.js",
     "start": "node --env-file=.env src/main.js",
-    "migrate": "node --env-file=.env src/adapters/out/postgres/migrate.js"
+    "migrate": "node --env-file=.env src/adapters/out/postgres/migrate.js",
+    "seed": "node --env-file=.env src/adapters/out/postgres/seed.js",
+    "test": "node --import ./tests/loadEnv.js --test"
   },
-  "dependencies": { "cors": "^2.8.5", "express": "^4.21.0", "pg": "^8.13.0" }
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.0",
+    "helmet": "^8.3.0",
+    "pg": "^8.13.0"
+  }
 }

@@ -34,5 +34,57 @@ td.low { color: var(--warn); font-weight: 700; }
 .empty { color: var(--muted); padding: 1rem 0; }
 #toast { position: fixed; bottom: 1.2rem; right: 1.2rem; background: var(--ink); color: #fff; padding: .75rem 1rem; border-radius: 8px; opacity: 0; pointer-events: none; transition: opacity .2s; }
 #toast.show { opacity: 1; } #toast.bad { background: var(--warn); }
-@media (max-width: 760px) { body { grid-template-columns: 1fr; } aside { padding: 1rem; } nav { flex-direction: row; flex-wrap: wrap; } main { padding: 1rem; } }
+/* Sesión: bloque de usuario al pie del aside */
+#whoami { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #2f5560; display: flex; flex-direction: column; gap: .35rem; }
+#whoami-name { font-weight: 600; }
+#whoami-role { color: #9fb4ab; font-size: .85rem; }
+#whoami button { margin-top: .5rem; color: #c6d4cc; border-color: #4a6b74; }
+
+/* Login */
+form.login { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 1.25rem; display: flex; flex-direction: column; gap: .9rem; max-width: 420px; }
+form.login label { display: flex; flex-direction: column; gap: .35rem; font-size: .92rem; color: var(--muted); }
+form.login input:disabled { background: #eef1ee; color: var(--ink); }
+
+/* Badges de estado y detalle de orden */
+.badge { display: inline-block; padding: .15rem .5rem; border-radius: 999px; font-size: .82rem; font-weight: 600; }
+.badge.paid { background: #d9efe4; color: #14563f; }
+.badge.pending { background: #fbe6d5; color: #8a3d12; }
+.detail-meta { color: var(--muted); margin: -0.5rem 0 1.25rem; }
+.detail-meta a { color: var(--accent); }
+main h3 { margin: 1.75rem 0 .75rem; font-size: 1.1rem; }
+
+/* Chips de estado de cotización */
+.chip { display: inline-block; padding: .15rem .6rem; border-radius: 999px; font-size: .82rem; font-weight: 600; vertical-align: middle; }
+.chip-draft { background: #eef1ee; color: #5d6f73; }
+.chip-sent { background: #dbe9f7; color: #1d4f7c; }
+.chip-accepted { background: #d9efe4; color: #14563f; }
+.chip-rejected { background: #f7dcd9; color: #8c2f22; }
+.chip-expired { background: #fbe6d5; color: #8a3d12; }
+.chip-converted { background: #e7def7; color: #4b3389; }
+
+/* ---------- Dashboard de Resumen ---------- */
+.dash-head { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; margin-bottom: 1.25rem; }
+.dash-head h2 { margin: 0; }
+
+/* Selector de periodo tipo segmentado */
+.period-toggle { display: inline-flex; background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 3px; gap: 2px; }
+.period-toggle button { border: 0; background: transparent; padding: .4rem .8rem; border-radius: 6px; font: inherit; font-size: .88rem; color: var(--muted); cursor: pointer; }
+.period-toggle button:hover { color: var(--ink); background: #eef1ee; }
+.period-toggle button.active { background: var(--accent); color: var(--accent-ink); font-weight: 600; }
+
+/* Tendencia mensual en las tarjetas KPI */
+.trend { display: block; font-size: .78rem; font-weight: 600; margin-top: .2rem; }
+.trend.up { color: #14563f; }
+.trend.down { color: #a33a1b; }
+
+/* Rejilla de gráficas: 2 columnas, la principal ocupa el ancho completo */
+.dash-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; margin-top: 1.25rem; }
+.dash-grid .wide { grid-column: 1 / -1; }
+.chart-card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 1rem 1.1rem 1.1rem; min-width: 0; }
+.chart-card h3 { margin: 0 0 .75rem; font-size: .98rem; font-weight: 600; color: var(--ink); }
+.chart-card .empty { margin: .5rem 0; padding: 2.2rem 1rem; text-align: center; }
+.chart-box { position: relative; height: 270px; }
+.dash-grid .wide .chart-box { height: 330px; }
+
+@media (max-width: 760px) { body { grid-template-columns: 1fr; } aside { padding: 1rem; } nav { flex-direction: row; flex-wrap: wrap; } main { padding: 1rem; } .dash-grid { grid-template-columns: 1fr; } }
 @media (prefers-reduced-motion: reduce) { #toast { transition: none; } }
