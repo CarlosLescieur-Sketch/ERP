@@ -74,4 +74,31 @@ export const makeQuoteRepository = (db) => ({
     if (!rows[0]) return null;
     return toQuote(rows[0]);
   },
+
+  /**
+   * Actualiza cabecera y líneas de un borrador. Solo se tocan las columnas
+   * mutables: estado, creador y conversión se conservan tal cual.
+   */
+  async update(quote) {
+    const { rows } = await db.query(
+      `UPDATE quotes SET partner_id = $2, subtotal = $3, tax = $4, total = $5,
+                         note = $6, expires_at = $7, updated_at = now()
+        WHERE id = $1 RETURNING *`,
+      [quote.id, quote.partnerId, quote.subtotal, quote.tax, quote.total,
+       quote.note, quote.expiresAt]);
+    if (!rows[0]) return null;
+    await db.query('DELETE FROM quote_items WHERE quote_id = $1', [quote.id]);
+    for (const l of quote.items) {
+      await db.query(
+        `INSERT INTO quote_items (quote_id, product_id, quantity, unit_price, tax_rate)
+         VALUES ($1,$2,$3,$4,$5)`,
+        [quote.id, l.productId, l.quantity, l.unitPrice, l.taxRate]);
+    }
+    return toQuote(rows[0]);
+  },
+
+  /** Borra la cotización: sus líneas caen en cascada (ON DELETE CASCADE). */
+  async remove(id) {
+    await db.query('DELETE FROM quotes WHERE id = $1', [id]);
+  },
 });

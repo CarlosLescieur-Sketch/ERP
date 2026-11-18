@@ -167,3 +167,78 @@ test('un proveedor no puede recibir cotizaciones aunque el id exista', async () 
   const { uc } = setup({ partners: [supplier], products: [{ id: 1, sku: 'P', name: 'X', price: 1, cost: 1, stock: 9 }] });
   await assert.rejects(() => newQuote(uc, { partnerId: 2 }), DomainError);
 });
+
+/* ---------- Edición y borrado de cotizaciones ---------- */
+
+const twoProducts = () => [
+  { id: 1, sku: 'P1', name: 'Uno', price: 10, cost: 5, stock: 50 },
+  { id: 2, sku: 'P2', name: 'Dos', price: 4, cost: 2, stock: 50 },
+];
+
+test('updateQuote edita un borrador: cabecera, líneas y nota', async () => {
+  const { world, uc } = setup({ partners: [customer], products: twoProducts() });
+  const q = await newQuote(uc); // 2 × 10 = 20 neto
+
+  const updated = await uc.updateQuote(q.id, {
+    partnerId: 1,
+    items: [{ productId: 2, quantity: 5, unitPrice: 6 }],
+    note: 'Cambio de última hora',
+  });
+  assert.equal(updated.status, 'draft');
+  assert.equal(updated.subtotal, 30);   // 5 × 6 neto (antes era 2 × 10)
+  assert.equal(updated.total, 34.8);    // 30 + IVA 16%
+  assert.equal(updated.note, 'Cambio de última hora');
+  assert.equal(updated.createdBy, 9);          // conserva al creador
+  assert.equal(updated.items.length, 1);
+  assert.equal(updated.items[0].productId, 2);
+  assert.equal(world.db.quotes[0].items[0].quantity, 5);
+});
+
+test('updateQuote conserva la nota si el input no la trae', async () => {
+  const { uc } = setup({ partners: [customer], products: twoProducts() });
+  const q = await newQuote(uc, { note: 'Original' });
+  const updated = await uc.updateQuote(q.id, {
+    partnerId: 1,
+    items: [{ productId: 1, quantity: 1, unitPrice: 10 }],
+  });
+  assert.equal(updated.note, 'Original');
+});
+
+test('updateQuote solo permite editar borradores', async () => {
+  const { uc } = setup({ partners: [customer], products: twoProducts() });
+  const q = await newQuote(uc);
+  await uc.transitionQuote(q.id, 'sent');
+  await assert.rejects(
+    () => uc.updateQuote(q.id, { partnerId: 1, items: [{ productId: 1, quantity: 1, unitPrice: 10 }] }),
+    /Solo se pueden editar cotizaciones en borrador/);
+  await assert.rejects(async () => uc.updateQuote(404, { partnerId: 1, items: [] }), NotFoundError);
+});
+
+test('deleteQuote borra el borrador con sus líneas', async () => {
+  const { world, uc } = setup({ partners: [customer], products: twoProducts() });
+  const q = await newQuote(uc);
+  const r = await uc.deleteQuote(q.id);
+  assert.equal(r.deleted, true);
+  assert.equal(world.db.quotes.length, 0);
+  await assert.rejects(async () => uc.deleteQuote(404), NotFoundError);
+});
+
+test('deleteQuote no borra una cotización ya convertida en venta', async () => {
+  const { world, uc } = setup({ partners: [customer], products: twoProducts() });
+  const q = await newQuote(uc);
+  await uc.transitionQuote(q.id, 'sent');
+  await uc.transitionQuote(q.id, 'accepted');
+  await uc.convertQuoteToSale(q.id);
+
+  await assert.rejects(() => uc.deleteQuote(q.id), /convertida en venta/);
+  assert.equal(world.db.quotes.length, 1); // sigue ahí, enlazada a la venta
+  assert.equal(world.db.orders.length, 1);
+});
+
+test('deleteQuote borra una cotización enviada (aunque ya no se edite)', async () => {
+  const { world, uc } = setup({ partners: [customer], products: twoProducts() });
+  const q = await newQuote(uc);
+  await uc.transitionQuote(q.id, 'sent');
+  await uc.deleteQuote(q.id);
+  assert.equal(world.db.quotes.length, 0);
+});

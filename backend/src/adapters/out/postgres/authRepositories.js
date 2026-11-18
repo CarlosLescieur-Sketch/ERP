@@ -32,9 +32,14 @@ export const makeUserRepository = (db) => ({
   },
   async update(u) {
     const { rows } = await db.query(
-      'UPDATE users SET password_hash = $2, active = $3 WHERE id = $1 RETURNING *',
-      [u.id, u.passwordHash, u.active]);
-    return toUser(rows[0]);
+      `UPDATE users SET email = $2, name = $3, role = $4, active = $5, password_hash = $6
+        WHERE id = $1 RETURNING *`,
+      [u.id, u.email, u.name, u.role, u.active, u.passwordHash]);
+    return rows[0] ? toUser(rows[0]) : null;
+  },
+  /** Borra el usuario: sus sesiones caen en cascada (ON DELETE CASCADE). */
+  async remove(id) {
+    await db.query('DELETE FROM users WHERE id = $1', [id]);
   },
 });
 

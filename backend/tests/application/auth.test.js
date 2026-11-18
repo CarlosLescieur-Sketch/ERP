@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { makeUseCases } from '../../src/application/useCases.js';
-import { DomainError, UnauthorizedError } from '../../src/domain/errors.js';
+import { DomainError, UnauthorizedError, NotFoundError } from '../../src/domain/errors.js';
 import { makeFakeWorld } from '../helpers/fakes.js';
 
 const admin = { id: 1, email: 'admin@local.dev', name: 'Admin', role: 'admin', active: true, passwordHash: 'fake:Admin123!' };
@@ -131,4 +131,81 @@ test('changePassword exige la contraseña actual y valida la nueva', async () =>
 
   // La contraseña vieja ya no sirve.
   await assert.rejects(() => uc.login({ email: 'admin@local.dev', password: 'Admin123!' }), UnauthorizedError);
+});
+
+/* ---------- Edición y borrado de usuarios ---------- */
+
+test('updateUser cambia nombre, rol y estado, y opcionalmente la contraseña', async () => {
+  const { world, uc } = setup({ users: [admin, seller] });
+  const updated = await uc.updateUser(2, {
+    email: 'vend@local.dev', name: 'Vendedor Nuevo', role: 'bodeguero', active: true,
+    password: 'NuevaClave123',
+  }, { id: 1 });
+  assert.equal(updated.name, 'Vendedor Nuevo');
+  assert.equal(updated.role, 'bodeguero');
+  assert.equal(updated.passwordHash, undefined); // nunca se expone
+  assert.equal(world.db.users[1].passwordHash, 'fake:NuevaClave123');
+
+  // Sin contraseña en el input → se conserva la actual.
+  const again = await uc.updateUser(2, {
+    email: 'vend@local.dev', name: 'Otra vez', role: 'bodeguero', active: true,
+  }, { id: 1 });
+  assert.equal(again.name, 'Otra vez');
+  assert.equal(world.db.users[1].passwordHash, 'fake:NuevaClave123');
+});
+
+test('updateUser valida rol, correo duplicado y contraseña corta', async () => {
+  const { uc } = setup({ users: [admin, seller] });
+  await assert.rejects(
+    () => uc.updateUser(2, { email: 'vend@local.dev', name: 'X', role: 'ninja', active: true }, { id: 1 }),
+    /Rol inválido/);
+  // Correo tomado por OTRO usuario.
+  await assert.rejects(
+    () => uc.updateUser(2, { email: 'admin@local.dev', name: 'X', role: 'vendedor', active: true }, { id: 1 }),
+    /Ya existe un usuario/);
+  // Mismo correo del propio usuario → no es duplicado.
+  await uc.updateUser(2, { email: 'vend@local.dev', name: 'Sigue', role: 'vendedor', active: true }, { id: 1 });
+  await assert.rejects(
+    () => uc.updateUser(2, { email: 'vend@local.dev', name: 'X', role: 'vendedor', active: true, password: 'corto' }, { id: 1 }),
+    /8 caracteres/);
+  await assert.rejects(async () => uc.updateUser(999, { email: 'a@b.co', name: 'X', role: 'admin' }, { id: 1 }), NotFoundError);
+});
+
+test('no puedo desactivarme a mí mismo ni perder la última administración', async () => {
+  const { uc } = setup({ users: [admin] });
+  // Desactivarse a uno mismo está prohibido.
+  await assert.rejects(
+    () => uc.updateUser(1, { email: admin.email, name: 'Admin', role: 'admin', active: false }, { id: 1 }),
+    /desactivar tu propia cuenta/);
+  // Quitar el rol admin al último admin activo también.
+  await assert.rejects(
+    () => uc.updateUser(1, { email: admin.email, name: 'Admin', role: 'vendedor', active: true }, { id: 1 }),
+    /último administrador/);
+  // Con otro admin activo, sí se puede.
+  const { uc: uc2 } = setup({ users: [admin, { ...seller, role: 'admin' }] });
+  const ok = await uc2.updateUser(1, { email: admin.email, name: 'Admin', role: 'vendedor', active: true }, { id: 2 });
+  assert.equal(ok.role, 'vendedor');
+});
+
+test('deleteUser borra el usuario y cierra sus sesiones', async () => {
+  const { world, uc } = setup({ users: [admin, seller] });
+  world.db.sessions.push({ token: 'tok-seller', userId: 2, expiresAt: Date.now() + 60_000 });
+
+  const r = await uc.deleteUser(2, { id: 1 });
+  assert.deepEqual(r, { deleted: true, id: 2 });
+  assert.equal(world.db.users.length, 1);
+  assert.equal(world.db.sessions.length, 0); // cascada
+  await assert.rejects(async () => uc.deleteUser(999, { id: 1 }), NotFoundError);
+});
+
+test('deleteUser no me deja borrarme a mí ni al último admin activo', async () => {
+  const { world, uc } = setup({ users: [admin, seller] });
+  await assert.rejects(() => uc.deleteUser(1, { id: 1 }), /tu propia cuenta/);
+  assert.equal(world.db.users.length, 2);
+
+  // El admin (id 1) es el único administrador activo.
+  await assert.rejects(() => uc.deleteUser(1, { id: 2 }), /último administrador/);
+  // ...pero sí se puede borrar el vendedor.
+  await uc.deleteUser(2, { id: 1 });
+  assert.equal(world.db.users.length, 1);
 });

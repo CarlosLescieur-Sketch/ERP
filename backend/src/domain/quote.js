@@ -55,6 +55,19 @@ export function assertTransition(quote, to, now = Date.now()) {
 }
 
 /**
+ * Valida una fecha de caducidad y la normaliza a ISO (vacío → null).
+ * Separada de buildQuote para que la edición de un borrador pueda reutilizar
+ * la misma regla sin re-validar una fecha ya guardada.
+ */
+export function parseExpiresAt(expiresAt) {
+  if (!expiresAt) return null;
+  const d = new Date(expiresAt);
+  if (Number.isNaN(d.getTime())) throw new DomainError('La fecha de caducidad no es válida');
+  if (d.getTime() <= Date.now()) throw new DomainError('La fecha de caducidad debe estar en el futuro');
+  return d.toISOString();
+}
+
+/**
  * Valida una cotización nueva y calcula sus totales con IVA.
  * Solo el estado inicial `draft` es válido al crear.
  */
@@ -80,13 +93,7 @@ export function buildQuote({ partnerId, items, note = null, expiresAt = null, ta
     return line;
   });
 
-  let expires = null;
-  if (expiresAt) {
-    const d = new Date(expiresAt);
-    if (Number.isNaN(d.getTime())) throw new DomainError('La fecha de caducidad no es válida');
-    if (d.getTime() <= Date.now()) throw new DomainError('La fecha de caducidad debe estar en el futuro');
-    expires = d.toISOString();
-  }
+  const expires = parseExpiresAt(expiresAt);
 
   const { subtotal, tax, total } = orderTotals(lines);
   return {

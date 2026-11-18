@@ -1,12 +1,14 @@
 import { makeQuoteRepository } from './quoteRepository.js';
 
 // `db` puede ser el Pool (consultas sueltas) o un Client dentro de una transacción.
-const toProduct = (r) => ({ id: r.id, sku: r.sku, name: r.name, price: Number(r.price), cost: Number(r.cost), stock: r.stock });
+const toProduct = (r) => ({ id: r.id, sku: r.sku, name: r.name, price: Number(r.price), cost: Number(r.cost), stock: r.stock, archived: r.archived });
 const round2 = (n) => Math.round(n * 100) / 100;
 
 export const makeProductRepository = (db) => ({
-  async findAll() {
-    const { rows } = await db.query('SELECT * FROM products ORDER BY name');
+  /** Activos por defecto; `{archived: true}` devuelve solo los archivados. */
+  async findAll({ archived = false } = {}) {
+    const { rows } = await db.query(
+      'SELECT * FROM products WHERE archived = $1 ORDER BY name', [archived]);
     return rows.map(toProduct);
   },
   async findById(id, { lock = false } = {}) {
@@ -19,15 +21,39 @@ export const makeProductRepository = (db) => ({
       [p.sku, p.name, p.price, p.cost, p.stock]);
     return toProduct(rows[0]);
   },
+  async update(p) {
+    const { rows } = await db.query(
+      `UPDATE products SET sku = $2, name = $3, price = $4, cost = $5, stock = $6
+        WHERE id = $1 RETURNING *`,
+      [p.id, p.sku, p.name, p.price, p.cost, p.stock]);
+    return rows[0] ? toProduct(rows[0]) : null;
+  },
+  async remove(id) {
+    await db.query('DELETE FROM products WHERE id = $1', [id]);
+  },
+  async setArchived(id, archived) {
+    const { rows } = await db.query(
+      'UPDATE products SET archived = $2 WHERE id = $1 RETURNING *', [id, archived]);
+    return rows[0] ? toProduct(rows[0]) : null;
+  },
+  /** ¿El producto aparece en alguna orden o cotización? (no se puede borrar). */
+  async inUse(id) {
+    const { rows } = await db.query(
+      `SELECT EXISTS(SELECT 1 FROM order_items WHERE product_id = $1)
+           OR EXISTS(SELECT 1 FROM quote_items  WHERE product_id = $1) AS in_use`, [id]);
+    return rows[0].in_use;
+  },
   async adjustStock(id, delta) {
     await db.query('UPDATE products SET stock = stock + $2 WHERE id = $1', [id, delta]);
   },
 });
 
 export const makePartnerRepository = (db) => ({
-  async findAll(kind) {
+  /** Activos por defecto; `{archived: true}` devuelve solo los archivados. */
+  async findAll(kind, { archived = false } = {}) {
     const { rows } = await db.query(
-      `SELECT * FROM partners ${kind ? 'WHERE kind = $1' : ''} ORDER BY name`, kind ? [kind] : []);
+      `SELECT * FROM partners WHERE archived = $2 ${kind ? 'AND kind = $1' : ''} ORDER BY name`,
+      [kind ?? null, archived]);
     return rows;
   },
   async findById(id) {
@@ -39,6 +65,27 @@ export const makePartnerRepository = (db) => ({
       'INSERT INTO partners (kind, name, email, phone) VALUES ($1,$2,$3,$4) RETURNING *',
       [p.kind, p.name, p.email, p.phone]);
     return rows[0];
+  },
+  async update(p) {
+    const { rows } = await db.query(
+      'UPDATE partners SET kind = $2, name = $3, email = $4, phone = $5 WHERE id = $1 RETURNING *',
+      [p.id, p.kind, p.name, p.email, p.phone]);
+    return rows[0] ?? null;
+  },
+  async remove(id) {
+    await db.query('DELETE FROM partners WHERE id = $1', [id]);
+  },
+  async setArchived(id, archived) {
+    const { rows } = await db.query(
+      'UPDATE partners SET archived = $2 WHERE id = $1 RETURNING *', [id, archived]);
+    return rows[0] ?? null;
+  },
+  /** ¿El tercero aparece en alguna orden o cotización? (no se puede borrar). */
+  async inUse(id) {
+    const { rows } = await db.query(
+      `SELECT EXISTS(SELECT 1 FROM orders WHERE partner_id = $1)
+           OR EXISTS(SELECT 1 FROM quotes WHERE partner_id = $1) AS in_use`, [id]);
+    return rows[0].in_use;
   },
 });
 
@@ -155,6 +202,71 @@ export const makeOrderRepository = (db) => ({
        VALUES ($1,$2,$3,$4,$5) RETURNING id, paid_at`,
       [orderId, payment.amount, payment.method, payment.note, createdById ?? null]);
     return { id: rows[0].id, orderId, ...payment, paidAt: rows[0].paid_at };
+  },
+
+  /* ---------- Edición y borrado (CRUD completo) ---------- */
+
+  /** Líneas de la orden: lo que hay que revertir al editar o borrar. */
+  async findItems(orderId) {
+    const { rows } = await db.query(
+      'SELECT product_id, quantity, unit_price, tax_rate FROM order_items WHERE order_id = $1 ORDER BY id',
+      [orderId]);
+    return rows.map((i) => ({
+      productId: i.product_id,
+      quantity: i.quantity,
+      unitPrice: Number(i.unit_price),
+      taxRate: Number(i.tax_rate),
+    }));
+  },
+
+  /** Cabecera de la orden (partner y totales recalculados). Null si no existe. */
+  async update(order) {
+    const { rows } = await db.query(
+      `UPDATE orders SET partner_id = $2, subtotal = $3, tax = $4, total = $5
+        WHERE id = $1 RETURNING id, created_at`,
+      [order.id, order.partnerId, order.subtotal, order.tax, order.total]);
+    return rows[0] ?? null;
+  },
+
+  /** Reemplaza todas las líneas de una orden (borra e inserta). */
+  async replaceItems(orderId, items) {
+    await db.query('DELETE FROM order_items WHERE order_id = $1', [orderId]);
+    for (const l of items) {
+      await db.query(
+        `INSERT INTO order_items (order_id, product_id, quantity, unit_price, tax_rate)
+         VALUES ($1,$2,$3,$4,$5)`,
+        [orderId, l.productId, l.quantity, l.unitPrice, l.taxRate]);
+    }
+  },
+
+  /** Borra la orden: líneas y pagos caen en cascada (ON DELETE CASCADE). */
+  async remove(id) {
+    await db.query('DELETE FROM orders WHERE id = $1', [id]);
+  },
+
+  /** Pago concreto (para editarlo o borrarlo). Null si no existe. */
+  async findPayment(id) {
+    const { rows } = await db.query(
+      'SELECT id, order_id, amount, method, note FROM payments WHERE id = $1', [id]);
+    if (!rows[0]) return null;
+    return {
+      id: rows[0].id,
+      orderId: rows[0].order_id,
+      amount: Number(rows[0].amount),
+      method: rows[0].method,
+      note: rows[0].note,
+    };
+  },
+
+  async updatePayment(id, payment) {
+    const { rows } = await db.query(
+      'UPDATE payments SET amount = $2, method = $3, note = $4 WHERE id = $1 RETURNING id, paid_at',
+      [id, payment.amount, payment.method, payment.note]);
+    return rows[0] ?? null;
+  },
+
+  async removePayment(id) {
+    await db.query('DELETE FROM payments WHERE id = $1', [id]);
   },
 });
 

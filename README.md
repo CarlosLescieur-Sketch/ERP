@@ -91,6 +91,7 @@ Todas las rutas salvo `/api/health` y `/api/auth/login` requieren sesión (cooki
 | GET | `/api/auth/me` | cualquiera | Usuario actual + sus permisos |
 | POST | `/api/auth/change-password` | cualquiera | `{ currentPassword, newPassword }` (mín. 8) |
 | GET / POST | `/api/users` | `users:manage` (admin) | Listar / crear usuarios |
+| PUT / DELETE | `/api/users/:id` | `users:manage` (admin) | Editar / eliminar usuario (sin auto-eliminación ni auto-desactivación) |
 | GET | `/api/health` | — | Estado de la API |
 
 ### Negocio
@@ -98,14 +99,22 @@ Todas las rutas salvo `/api/health` y `/api/auth/login` requieren sesión (cooki
 |---|---|---|---|
 | GET | `/api/summary` | cualquiera | Resumen (incluye por cobrar / por pagar) |
 | GET | `/api/reports/dashboard` | cualquiera | Dashboard: serie mensual (`?months=3..24`), top productos/clientes, cobros por método y cotizaciones por estado |
-| GET / POST | `/api/products` | escritura: `products:write` | Listar / crear productos |
-| GET / POST | `/api/partners` | escritura: `partners:write` | Listar (`?kind=customer\|supplier`) / crear |
+| GET / POST | `/api/products` | escritura: `products:write` | Listar (activos; `?archived=1` lista solo archivados) / crear |
+| PUT / DELETE | `/api/products/:id` | `products:write` | Editar / borrar (o archivar si está en una orden) |
+| POST | `/api/products/:id/archive` | `products:write` | Archivar / desarchivar (`{ "archived": true }`) |
+| GET / POST | `/api/partners` | escritura: `partners:write` | Listar (`?kind=customer\|supplier`; `?archived=1` lista solo archivados) / crear |
+| PUT / DELETE | `/api/partners/:id` | `partners:write` | Editar / borrar (o archivar si tiene órdenes) |
+| POST | `/api/partners/:id/archive` | `partners:write` | Archivar / desarchivar (`{ "archived": true }`) |
 | GET / POST | `/api/purchases` | escritura: `purchases:write` | Listar / registrar compras |
+| PUT / DELETE | `/api/purchases/:id` | `purchases:write` | Editar / borrar compra (ajusta stock; borra pagos en cascada) |
 | GET / POST | `/api/sales` | escritura: `sales:write` | Listar / registrar ventas |
+| PUT / DELETE | `/api/sales/:id` | `sales:write` | Editar / borrar venta (ajusta stock; borra pagos en cascada) |
 | GET | `/api/sales/:id`, `/api/purchases/:id` | cualquiera | Detalle: líneas, pagos y saldo |
 | POST | `/api/sales/:id/payments`, `/api/purchases/:id/payments` | `payments:write` | Registrar pago parcial |
+| PUT / DELETE | `/api/sales/:id/payments/:pid`, `/api/purchases/:id/payments/:pid` | `payments:write` | Editar / eliminar un pago |
 | GET / POST | `/api/quotes` | escritura: `quotes:write` | Listar / crear cotización (borrador) |
 | GET | `/api/quotes/:id` | cualquiera | Detalle con estado efectivo y transiciones permitidas |
+| PUT / DELETE | `/api/quotes/:id` | `quotes:write` | Editar / borrar (solo borradores) |
 | PATCH | `/api/quotes/:id/status` | `quotes:write` | Cambiar estado (máquina de estados) |
 | POST | `/api/quotes/:id/convert` | `quotes:write` | Convertir cotización aceptada en venta |
 
@@ -147,7 +156,7 @@ Ejemplos de cuerpo (JSON):
 
 Los ids dependen de tu base: consúltalos con `GET /api/partners?kind=...` y `GET /api/products`.
 
-Códigos de error: `400` regla de negocio o validación, `401` sin sesión, `403` sin permiso, `404` recurso inexistente, `409` valor único repetido (SKU/correo), `429` límite de intentos de login, `500` error interno.
+Códigos de error: `400` regla de negocio o validación, `401` sin sesión, `403` sin permiso, `404` recurso inexistente, `409` valor único repetido (SKU/correo) o registro en uso por otros datos, `429` límite de intentos de login, `500` error interno.
 
 ## Reglas de negocio
 
@@ -159,6 +168,7 @@ Códigos de error: `400` regla de negocio o validación, `401` sin sesión, `403
 - Al borrar una orden se borran sus líneas y pagos (`ON DELETE CASCADE`).
 - Pagos: `amount > 0`, método `cash | transfer | card`.
 - Cotizaciones: estado restringido a `draft, sent, accepted, rejected, expired, converted`.
+- `products` y `partners` tienen columna `archived` (migración `006`); los listados por defecto la excluyen y los joins del historial **no** la filtran (el historial no se rompe al archivar).
 
 Las migraciones son versionadas (`001_…`, `002_…`, …), se aplican en orden con transacción por archivo y quedan registradas en `schema_migrations`. Repetir `npm run db:migrate` es seguro (idempotente).
 
@@ -176,7 +186,11 @@ Las migraciones son versionadas (`001_…`, `002_…`, …), se aplican en orden
 - Una venta se rechaza si no hay stock suficiente.
 - Orden, líneas y movimiento de inventario se guardan en **una sola transacción** (todo o nada).
 - El producto se bloquea (`FOR UPDATE`) durante el registro para evitar que dos ventas simultáneas vendan el mismo stock.
-- **Pagos:** el saldo nunca se almacena (`total − SUM(payments)`); la orden se bloquea con `FOR UPDATE` para que dos cobros simultáneos no sobrepasen el saldo, y no se admite sobrepago.
+- **Editar orden (venta/compra):** las líneas se reemplazan en una sola transacción; el stock se ajusta por diferencia entre líneas viejas y nuevas y el total no puede quedar por debajo de lo ya pagado. **Borrar orden:** devuelve el stock, borra sus pagos en cascada y falla si una compra posterior ya consumió ese stock.
+- **Pagos:** el saldo nunca se almacena (`total − SUM(payments)`); la orden se bloquea con `FOR UPDATE` para que dos cobros simultáneos no sobrepasen el saldo, y no se admite sobrepago. Un pago se puede editar o eliminar (el saldo se recalcula al vuelo).
+- **Productos y terceros:** se pueden editar y borrar. Si el registro está en uso (una orden/cotización lo referencia), `DELETE` **lo archiva en su lugar** (responde `{ "archived": true }`) en vez de borrarlo; si ya estaba archivado y sigue en uso, responde `400`. Un tercero archivado no admite nuevas ventas/compras/cotizaciones. `POST /:id/archive` alterna el estado a mano.
+- **Cotizaciones:** solo un `draft` se puede editar o borrar; una convertida es inmutable.
+- **Usuarios:** nadie se auto-elimina ni se auto-desactiva, y siempre queda al menos un admin activo; la contraseña es opcional al editar.
 - **Conversión de cotización:** marca `convertida` y crea la venta en **una sola transacción**; si falta stock, falla entero y la cotización queda `aceptada` (reintentable).
 - **Login:** contraseña con `scrypt` (sin dependencias nativas), sesión en tabla `sessions` + cookie httpOnly, rate-limit de intentos (10 cada 15 min por IP+correo).
 
@@ -193,9 +207,9 @@ Las migraciones son versionadas (`001_…`, `002_…`, …), se aplican en orden
 ### Limitaciones actuales
 - No hay devoluciones, múltiples almacenes, lotes ni caducidades.
 - No hay bitácora (audit log) ni reportes avanzados.
-- No se pueden cancelar órdenes ni editar/borrar productos.
-- Un producto que aparece en alguna orden no puede borrarse (llave foránea).
-- Las cotizaciones no se pueden editar una vez enviadas (habría que crear un borrador nuevo).
+- Editar o borrar una orden que ya tiene pagos afecta su historial de cobros: los pagos se eliminan en cascada (no se conserva un "pago huérfano").
+- Una cotización solo es editable mientras está en borrador; para cambiar una enviada hay que rechazarla y crear otra.
+- Archivar es la vía alternativa al borrado para registros en uso; el historial los sigue mostrando (sin filtrar por `archived`).
 
 ## Solución de problemas
 

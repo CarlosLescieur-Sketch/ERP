@@ -115,3 +115,52 @@ test('getOrder devuelve el detalle o null si no existe', async () => {
   assert.equal(order.balance, 116);
   assert.equal(await uc.getOrder(999), null);
 });
+
+/* ---------- Edición y borrado de pagos ---------- */
+
+const paidSeed = (payments, over = {}) => ({
+  ...saleSeed(),
+  payments: payments.map((p, i) => ({ id: i + 1, orderId: 1, method: 'cash', note: null, paidAt: 'hoy', ...p })),
+  ...over,
+});
+
+test('updatePayment cambia monto y método y devuelve el saldo nuevo', async () => {
+  const { world, uc } = setup(paidSeed([{ amount: 40 }]));
+  const r = await uc.updateSalePayment(1, 1, { amount: 60, method: 'transfer', note: 'Revisión' });
+  assert.equal(r.amount, 60);
+  assert.equal(r.method, 'transfer');
+  assert.equal(r.balance, 56); // 116 − 60
+  assert.equal(world.db.payments[0].amount, 60);
+  assert.equal(world.db.payments[0].method, 'transfer');
+});
+
+test('updatePayment no admite exceder el saldo (contando los demás pagos)', async () => {
+  const { world, uc } = setup(paidSeed([{ amount: 40 }, { amount: 50 }]));
+  // Pagado 90; editar el de 40 deja disponibles 116 − 50 = 66.
+  await assert.rejects(
+    () => uc.updateSalePayment(1, 1, { amount: 66.01 }),
+    /excede el saldo pendiente \(66\.00\)/);
+  assert.equal(world.db.payments[0].amount, 40); // el fallo no tocó nada
+
+  const ok = await uc.updateSalePayment(1, 1, { amount: 66 });
+  assert.equal(ok.balance, 0); // 66 + 50 = 116 → saldada
+});
+
+test('updatePayment de un pago ajeno a la orden → NotFoundError', async () => {
+  const { uc } = setup(paidSeed([{ amount: 40 }]));
+  await assert.rejects(async () => uc.updateSalePayment(1, 999, { amount: 10 }), NotFoundError);
+  await assert.rejects(
+    async () => uc.updatePurchasePayment(1, 1, { amount: 10 }),
+    /no es una compra/);
+});
+
+test('deletePayment borra el pago y recalcula el saldo', async () => {
+  const { world, uc } = setup(paidSeed([{ amount: 40 }, { amount: 50 }]));
+  const r = await uc.deleteSalePayment(1, 1);
+  assert.equal(r.deleted, true);
+  assert.equal(r.balance, 66); // 116 − 50
+  assert.equal(world.db.payments.length, 1);
+  assert.equal(await world.orders.paidByOrder(1), 50);
+
+  await assert.rejects(async () => uc.deleteSalePayment(1, 999), NotFoundError);
+});

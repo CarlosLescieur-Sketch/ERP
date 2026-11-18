@@ -34,12 +34,96 @@ function toast(msg, bad = false) {
   toastTimer = setTimeout(() => (t.className = ''), 3500);
 }
 
-// Envuelve un submit: ejecuta, muestra mensaje y vuelve a pintar la vista.
-const onSubmit = (form, action, okMsg) => form.addEventListener('submit', async (e) => {
-  e.preventDefault();
-  try { await action(Object.fromEntries(new FormData(form))); toast(okMsg); render(); }
-  catch (err) { toast(err.message, true); }
-});
+/* ---------- Edición y borrado de registros ---------- */
+
+// Confirmación estándar para todo lo que no se puede deshacer.
+const confirmDelete = (msg) => window.confirm(`${msg} Esta acción no se puede deshacer.`);
+
+/**
+ * Pone un form inline en modo edición: rellena `fields`, cambia el rótulo del
+ * botón y muestra Cancelar. El id del registro queda en `form.dataset.editing`
+ * (vacío = modo alta). El caller se encarga de render() al terminar.
+ */
+function startEdit(form, record, fields) {
+  form.dataset.editing = record.id;
+  for (const [name, value] of Object.entries(fields)) {
+    const el = form.elements[name];
+    if (!el) continue;
+    if (el.type === 'checkbox') el.checked = Boolean(value);
+    else el.value = value ?? '';
+  }
+  const submit = [...form.querySelectorAll('button')].find((b) => b.type !== 'button');
+  submit.dataset.label ??= submit.textContent;
+  submit.textContent = 'Guardar cambios';
+  const cancel = form.querySelector('[data-cancel]');
+  if (cancel) cancel.hidden = false;
+  form.classList.add('editing');
+  form.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
+}
+
+// Vuelve el form a modo alta (la vista suele hacer render() justo después).
+function endEdit(form) {
+  delete form.dataset.editing;
+  const submit = [...form.querySelectorAll('button')].find((b) => b.type !== 'button');
+  if (submit?.dataset.label) submit.textContent = submit.dataset.label;
+  const cancel = form.querySelector('[data-cancel]');
+  if (cancel) cancel.hidden = true;
+  form.classList.remove('editing');
+  form.reset();
+}
+
+// Celda de acciones por fila: Editar/Borrar, o Restaurar/Borrar en archivados.
+const rowActions = (id, archived) => `<td class="row-actions">
+    ${archived
+      ? `<button type="button" class="mini" data-restore="${id}">Restaurar</button>`
+      : `<button type="button" class="mini" data-edit="${id}">Editar</button>`}
+    <button type="button" class="mini danger" data-del="${id}">Borrar</button>
+  </td>`;
+
+// Estado de las vistas con listas conmutables (persiste al navegar, como dashMonths).
+const listState = { productsArchived: false, customersArchived: false, suppliersArchived: false };
+
+/**
+ * Monta un editor de líneas de productos dentro de `container`: cada línea es
+ * select(cantidad + precio neto), con auto-precio al cambiar de producto,
+ * botón "Quitar" y "Agregar producto" en `addBtn`.
+ *
+ * `items` son las líneas actuales (edición) y `products` el catálogo activo;
+ * un producto archivado que siga en `items` se añade como opción "(archivado)"
+ * para que la edición pueda conservarlo.
+ */
+function mountLineEditor(container, addBtn, items, products, priceOf) {
+  const optsFor = (item) => {
+    let html = products.map((p) =>
+      `<option value="${p.id}" data-price="${priceOf(p)}"` +
+      `${item?.productId === p.id ? ' selected' : ''}>${esc(p.name)} (stock ${p.stock})</option>`).join('');
+    if (item && !products.some((p) => p.id === item.productId))
+      html += `<option value="${item.productId}" data-price="${item.unitPrice}" selected>${esc(item.name)} (archivado)</option>`;
+    return html;
+  };
+  const lineRow = (item) => `<div class="line">
+    <select name="productId" required>${optsFor(item)}</select>
+    <input name="quantity" type="number" min="1" step="1" value="${item?.quantity ?? 1}" required />
+    <input name="unitPrice" type="number" min="0" step="0.01" value="${item?.unitPrice ?? ''}" required />
+    <button type="button" class="ghost rm" aria-label="Quitar línea">Quitar</button>
+  </div>`;
+  const fillPrice = (row) => {
+    const opt = $('select', row).selectedOptions[0];
+    $('[name=unitPrice]', row).value = opt.dataset.price;
+  };
+
+  container.innerHTML = items.length ? items.map((i) => lineRow(i)).join('') : lineRow();
+  container.addEventListener('change', (e) => { if (e.target.name === 'productId') fillPrice(e.target.closest('.line')); });
+  container.addEventListener('click', (e) => { if (e.target.classList.contains('rm') && container.children.length > 1) e.target.closest('.line').remove(); });
+  addBtn.addEventListener('click', () => { container.insertAdjacentHTML('beforeend', lineRow()); fillPrice(container.lastElementChild); });
+}
+
+// Lee las líneas de un editor montado por mountLineEditor.
+const readLines = (container) => [...container.children].map((r) => ({
+  productId: $('[name=productId]', r).value,
+  quantity: $('[name=quantity]', r).value,
+  unitPrice: $('[name=unitPrice]', r).value,
+}));
 
 /* ---------- Sesión ---------- */
 let session = null; // { id, email, name, role, permissions: string[], ... } | null
@@ -159,37 +243,171 @@ const views = {
   },
 
   async productos() {
-    const items = await api.products();
+    const archived = listState.productsArchived;
+    const items = await api.products(archived);
+    const write = can('products:write');
+    const heads = ['SKU', 'Producto', 'Costo', 'Precio', 'Stock'];
+    if (write) heads.push('Acciones');
+
     view.innerHTML = `<h2>Inventario</h2>
-      ${can('products:write') ? `<form id="f" class="inline">
+      ${write ? `<form id="f" class="inline">
         <input name="sku" placeholder="SKU" required />
         <input name="name" placeholder="Nombre" required />
         <input name="cost" type="number" step="0.01" min="0" placeholder="Costo" required />
         <input name="price" type="number" step="0.01" min="0" placeholder="Precio venta" required />
-        <input name="stock" type="number" min="0" step="1" placeholder="Stock inicial" value="0" />
+        <input name="stock" type="number" min="0" step="1" placeholder="Stock" value="0" />
         <button>Guardar producto</button>
-      </form>` : ''}
-      ${table(['SKU', 'Producto', 'Costo', 'Precio', 'Stock'], items.map((p) =>
-        `<tr><td>${esc(p.sku)}</td><td>${esc(p.name)}</td><td>${money(p.cost)}</td><td>${money(p.price)}</td>
-         <td class="${p.stock <= 5 ? 'low' : ''}">${p.stock}</td></tr>`), 'Aún no hay productos. Registra el primero arriba.')}`;
-    if (can('products:write')) onSubmit($('#f'), api.createProduct, 'Producto guardado');
+        <button type="button" class="ghost" data-cancel hidden>Cancelar</button>
+      </form>
+      <div class="list-head">
+        <span class="empty">${items.length} producto${items.length === 1 ? '' : 's'}${archived ? ' archivado(s)' : ''}</span>
+        <button type="button" class="ghost" id="toggle-arch">${archived ? '← Ver activos' : 'Ver archivados'}</button>
+      </div>` : ''}
+      ${table(heads, items.map((p) => `<tr>
+        <td>${esc(p.sku)}</td><td>${esc(p.name)}</td><td>${money(p.cost)}</td><td>${money(p.price)}</td>
+        <td class="${p.stock <= 5 ? 'low' : ''}">${p.stock}</td>
+        ${write ? rowActions(p.id, archived) : ''}
+      </tr>`), archived
+        ? 'No hay productos archivados.'
+        : 'Aún no hay productos. Registra el primero arriba.')}`;
+
+    if (!write) return;
+    const form = $('#f');
+
+    $('#toggle-arch').addEventListener('click', () => {
+      listState.productsArchived = !listState.productsArchived;
+      render();
+    });
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const data = Object.fromEntries(new FormData(form));
+      try {
+        if (form.dataset.editing) {
+          await api.updateProduct(form.dataset.editing, data);
+          toast('Producto actualizado');
+        } else {
+          await api.createProduct(data);
+          toast('Producto guardado');
+        }
+        render();
+      } catch (err) { toast(err.message, true); }
+    });
+    form.querySelector('[data-cancel]').addEventListener('click', () => { endEdit(form); render(); });
+
+    view.querySelectorAll('[data-edit]').forEach((b) => b.addEventListener('click', () => {
+      const p = items.find((x) => x.id === Number(b.dataset.edit));
+      startEdit(form, p, { sku: p.sku, name: p.name, cost: p.cost, price: p.price, stock: p.stock });
+      form.elements.sku.focus();
+    }));
+
+    view.querySelectorAll('[data-restore]').forEach((b) => b.addEventListener('click', async () => {
+      try { await api.archiveProduct(b.dataset.restore, false); toast('Producto restaurado'); render(); }
+      catch (err) { toast(err.message, true); }
+    }));
+
+    view.querySelectorAll('[data-del]').forEach((b) => b.addEventListener('click', async () => {
+      const p = items.find((x) => x.id === Number(b.dataset.del));
+      if (!confirmDelete(`¿Eliminar el producto "${p.name}"?`)) return;
+      try {
+        const r = await api.deleteProduct(p.id);
+        toast(r.archived ? 'Está en uso por el historial: se archivó en su lugar' : 'Producto eliminado');
+        render();
+      } catch (err) { toast(err.message, true); }
+    }));
   },
 
   async terceros() {
-    const items = await api.partners();
-    const label = { customer: 'Cliente', supplier: 'Proveedor' };
+    // Una sección por tipo, cada una con su lista (activos o archivados).
+    const [customers, suppliers] = await Promise.all([
+      api.partners('customer', listState.customersArchived),
+      api.partners('supplier', listState.suppliersArchived),
+    ]);
+    const write = can('partners:write');
+
+    const section = (kind, items) => {
+      const label = kind === 'customer' ? 'Clientes' : 'Proveedores';
+      const archived = listState[kind === 'customer' ? 'customersArchived' : 'suppliersArchived'];
+      const heads = ['Nombre', 'Correo', 'Teléfono'];
+      if (write) heads.push('Acciones');
+      return `<section class="entity" data-kind="${kind}">
+        <div class="list-head">
+          <h3>${label} <span class="count">${items.length}</span></h3>
+          ${write ? `<button type="button" class="ghost" data-toggle="${kind}">${archived ? '← Ver activos' : 'Ver archivados'}</button>` : ''}
+        </div>
+        ${write ? `<form id="f-${kind}" class="inline">
+          <input name="name" placeholder="Nombre" required />
+          <input name="email" type="email" placeholder="Correo" />
+          <input name="phone" placeholder="Teléfono" />
+          <button>Guardar</button>
+          <button type="button" class="ghost" data-cancel hidden>Cancelar</button>
+        </form>` : ''}
+        ${table(heads, items.map((p) => `<tr>
+          <td>${esc(p.name)}</td><td>${esc(p.email || '—')}</td><td>${esc(p.phone || '—')}</td>
+          ${write ? rowActions(p.id, archived) : ''}
+        </tr>`), archived
+          ? `No hay ${label.toLowerCase()} archivados.`
+          : `Aún no hay ${label.toLowerCase()}. Registra el primero arriba.`)}
+      </section>`;
+    };
+
     view.innerHTML = `<h2>Clientes y proveedores</h2>
-      ${can('partners:write') ? `<form id="f" class="inline">
-        <select name="kind"><option value="customer">Cliente</option><option value="supplier">Proveedor</option></select>
-        <input name="name" placeholder="Nombre" required />
-        <input name="email" type="email" placeholder="Correo" />
-        <input name="phone" placeholder="Teléfono" />
-        <button>Guardar</button>
-      </form>` : ''}
-      ${table(['Tipo', 'Nombre', 'Correo', 'Teléfono'], items.map((p) =>
-        `<tr><td>${label[p.kind]}</td><td>${esc(p.name)}</td><td>${esc(p.email)}</td><td>${esc(p.phone)}</td></tr>`),
-        'Aún no hay registros.')}`;
-    if (can('partners:write')) onSubmit($('#f'), api.createPartner, 'Registro guardado');
+      ${section('customer', customers)}
+      ${section('supplier', suppliers)}`;
+
+    if (!write) return;
+
+    // Cablea cada sección por separado: su formulario, sus acciones y su lista.
+    for (const kind of ['customer', 'supplier']) {
+      const el = view.querySelector(`section[data-kind="${kind}"]`);
+      const form = $(`#f-${kind}`, el);
+      const list = kind === 'customer' ? customers : suppliers;
+      const stateKey = kind === 'customer' ? 'customersArchived' : 'suppliersArchived';
+
+      $(`[data-toggle="${kind}"]`, el).addEventListener('click', () => {
+        listState[stateKey] = !listState[stateKey];
+        render();
+      });
+
+      form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        // El tipo lo pone la sección: no hay selector en el formulario.
+        const data = { ...Object.fromEntries(new FormData(form)), kind };
+        try {
+          if (form.dataset.editing) {
+            await api.updatePartner(form.dataset.editing, data);
+            toast(`${kind === 'customer' ? 'Cliente' : 'Proveedor'} actualizado`);
+          } else {
+            await api.createPartner(data);
+            toast('Registro guardado');
+          }
+          render();
+        } catch (err) { toast(err.message, true); }
+      });
+      form.querySelector('[data-cancel]').addEventListener('click', () => { endEdit(form); render(); });
+
+      el.querySelectorAll('[data-edit]').forEach((b) => b.addEventListener('click', () => {
+        const p = list.find((x) => x.id === Number(b.dataset.edit));
+        startEdit(form, p, { name: p.name, email: p.email, phone: p.phone });
+        form.elements.name.focus();
+      }));
+
+      el.querySelectorAll('[data-restore]').forEach((b) => b.addEventListener('click', async () => {
+        try { await api.archivePartner(b.dataset.restore, false); toast('Registro restaurado'); render(); }
+        catch (err) { toast(err.message, true); }
+      }));
+
+      el.querySelectorAll('[data-del]').forEach((b) => b.addEventListener('click', async () => {
+        const p = list.find((x) => x.id === Number(b.dataset.del));
+        const label = kind === 'customer' ? 'cliente' : 'proveedor';
+        if (!confirmDelete(`¿Eliminar el ${label} "${p.name}"?`)) return;
+        try {
+          const r = await api.deletePartner(p.id);
+          toast(r.archived ? 'Está en uso por el historial: se archivó en su lugar' : 'Registro eliminado');
+          render();
+        } catch (err) { toast(err.message, true); }
+      }));
+    }
   },
 
   async usuarios() {
@@ -205,12 +423,53 @@ const views = {
           <option value="bodeguero">Bodeguero</option>
         </select>
         <input name="password" type="password" minlength="8" placeholder="Contraseña (mín. 8)" required />
+        <label class="check"><input name="active" type="checkbox" checked /> Activo</label>
         <button>Crear usuario</button>
+        <button type="button" class="ghost" data-cancel hidden>Cancelar</button>
       </form>
-      ${table(['Nombre', 'Correo', 'Rol', 'Estado'], items.map((u) =>
+      ${table(['Nombre', 'Correo', 'Rol', 'Estado', 'Acciones'], items.map((u) =>
         `<tr><td>${esc(u.name)}</td><td>${esc(u.email)}</td><td>${roleLabel[u.role] ?? esc(u.role)}</td>
-         <td>${u.active ? 'Activo' : 'Inactivo'}</td></tr>`), 'Aún no hay usuarios.')}`;
-    onSubmit($('#f'), api.createUser, 'Usuario creado');
+         <td>${u.active ? 'Activo' : 'Inactivo'}</td>
+         <td class="row-actions">
+           <button type="button" class="mini" data-edit="${u.id}">Editar</button>
+           ${u.id === session.id ? '' : `<button type="button" class="mini danger" data-del="${u.id}">Borrar</button>`}
+         </td></tr>`), 'Aún no hay usuarios.')}`;
+
+    const form = $('#f');
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = Object.fromEntries(new FormData(form));
+      // `active` va explícito: una casilla desmarcada no viaja en FormData.
+      const data = { ...f, active: form.elements.active.checked };
+      try {
+        if (form.dataset.editing) {
+          await api.updateUser(form.dataset.editing, data);
+          toast('Usuario actualizado');
+        } else {
+          await api.createUser(data);
+          toast('Usuario creado');
+        }
+        render();
+      } catch (err) { toast(err.message, true); }
+    });
+    form.querySelector('[data-cancel]').addEventListener('click', () => { endEdit(form); render(); });
+
+    view.querySelectorAll('[data-edit]').forEach((b) => b.addEventListener('click', () => {
+      const u = items.find((x) => x.id === Number(b.dataset.edit));
+      startEdit(form, u, { email: u.email, name: u.name, role: u.role, active: u.active });
+      // Al editar, la contraseña es opcional (vacío = mantener la actual).
+      form.elements.password.required = false;
+      form.elements.password.placeholder = 'Nueva contraseña (opcional)';
+      form.elements.email.focus();
+    }));
+
+    view.querySelectorAll('[data-del]').forEach((b) => b.addEventListener('click', async () => {
+      const u = items.find((x) => x.id === Number(b.dataset.del));
+      if (!confirmDelete(`¿Eliminar el usuario "${u.name}"? Se cerrarán sus sesiones.`)) return;
+      try { await api.deleteUser(u.id); toast('Usuario eliminado'); render(); }
+      catch (err) { toast(err.message, true); }
+    }));
   },
 
   async perfil() {
@@ -363,17 +622,24 @@ views.cotizaciones = async () => {
 
 async function quoteDetail(id) {
   const q = await api.quote(id);
+  const write = can('quotes:write');
+  const editable = q.status === 'draft';      // solo los borradores se editan
+  const deletable = q.status !== 'converted'; // la convertida enlaza una venta real
   const items = q.items.map((i) =>
     `<tr><td>${esc(i.sku)}</td><td>${esc(i.name)}</td><td>${i.quantity}</td>
      <td>${money(i.unitPrice)}</td><td>${i.taxRate}%</td><td>${money(i.quantity * i.unitPrice * (1 + i.taxRate / 100))}</td></tr>`);
 
-  const buttons = can('quotes:write')
+  const buttons = write
     ? (q.allowed ?? []).map((t) => {
         const [action, label] = (QUOTE_ACTIONS[t] ?? [`${t}:${t}`])[0].split(':');
         return action === 'convert'
           ? `<button data-convert>${label}</button>`
           : `<button class="ghost" data-status="${action}">${label}</button>`;
       }).join('')
+    : '';
+  const crudButtons = write
+    ? `${editable ? '<button type="button" class="ghost" id="edit-quote">Editar</button>' : ''}
+       ${deletable ? '<button type="button" class="danger" id="del-quote">Eliminar</button>' : ''}`
     : '';
 
   view.innerHTML = `<h2>Cotización #${q.id} ${statusChip(q.status)}</h2>
@@ -386,6 +652,17 @@ async function quoteDetail(id) {
     </p>
     ${q.note ? `<p class="empty">“${esc(q.note)}”</p>` : ''}
 
+    ${write && editable ? `<form id="editq" class="order" hidden>
+      <select name="partnerId" id="q-e-partner" required></select>
+      <textarea name="note" id="q-e-note" rows="2" placeholder="Nota (opcional)"></textarea>
+      <div id="q-e-lines"></div>
+      <div class="actions">
+        <button type="button" class="ghost" id="q-e-add">Agregar producto</button>
+        <button>Guardar cambios</button>
+        <button type="button" class="ghost" id="q-e-cancel">Cancelar</button>
+      </div>
+    </form>` : ''}
+
     <div class="stats">
       <div class="stat"><span>Subtotal (neto)</span><strong>${money(q.subtotal)}</strong></div>
       <div class="stat"><span>IVA</span><strong>${money(q.tax)}</strong></div>
@@ -395,7 +672,9 @@ async function quoteDetail(id) {
     <h3>Productos cotizados</h3>
     ${table(['SKU', 'Producto', 'Cant.', 'Precio neto', 'IVA', 'Importe c/IVA'], items, 'Sin líneas.')}
 
-    ${buttons ? `<div class="actions"><h3 style="margin:0;flex:1">Acciones</h3>${buttons}</div>` : ''}`;
+    ${buttons || crudButtons
+      ? `<div class="actions"><h3 style="margin:0;flex:1">Acciones</h3>${buttons}${crudButtons}</div>`
+      : ''}`;
 
   view.querySelectorAll('[data-status]').forEach((b) => b.addEventListener('click', async () => {
     try { await api.quoteStatus(q.id, b.dataset.status); toast('Estado actualizado'); render(); }
@@ -408,22 +687,86 @@ async function quoteDetail(id) {
       location.hash = `venta-${order.id}`;
     } catch (err) { toast(err.message, true); }
   });
+
+  /* ---- Editar / eliminar (borrador) ---- */
+  if (write && editable) {
+    // Rellena el formulario con la cotización actual (una sola vez).
+    const loadEditForm = async (form) => {
+      const [partners, products] = await Promise.all([api.partners('customer'), api.products()]);
+      const partnerSel = $('#q-e-partner', form);
+      partnerSel.innerHTML = partners.map((p) => `<option value="${p.id}">${esc(p.name)}</option>`).join('');
+      if (!partners.some((p) => p.id === q.partnerId))
+        partnerSel.insertAdjacentHTML('afterbegin',
+          `<option value="${q.partnerId}">${esc(q.partner)} (archivado)</option>`);
+      partnerSel.value = q.partnerId;
+      mountLineEditor($('#q-e-lines', form), $('#q-e-add', form), q.items, products, (p) => p.price);
+      $('#q-e-note', form).value = q.note ?? '';
+      form.dataset.loaded = '1';
+    };
+
+    $('#edit-quote').addEventListener('click', async () => {
+      const form = $('#editq');
+      try {
+        if (!form.dataset.loaded) await loadEditForm(form);
+        form.hidden = false;
+        $('#edit-quote').hidden = true;
+        form.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      } catch (err) { toast(err.message, true); }
+    });
+    $('#q-e-cancel').addEventListener('click', () => {
+      $('#editq').hidden = true;
+      $('#edit-quote').hidden = false;
+    });
+    $('#editq').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      try {
+        await api.updateQuote(q.id, {
+          partnerId: $('#q-e-partner').value,
+          items: readLines($('#q-e-lines')),
+          note: $('#q-e-note').value,
+        });
+        toast('Cotización actualizada');
+        render();
+      } catch (err) { toast(err.message, true); }
+    });
+  }
+
+  if (write && deletable) {
+    $('#del-quote').addEventListener('click', async () => {
+      if (!confirmDelete(`¿Eliminar la cotización #${q.id}?`)) return;
+      try {
+        await api.deleteQuote(q.id);
+        toast('Cotización eliminada');
+        location.hash = 'cotizaciones';
+      } catch (err) { toast(err.message, true); }
+    });
+  }
 }
 
 /* ---------- Detalle de orden (con pagos) ---------- */
 async function orderDetail(kind, id) {
   const isSale = kind === 'sale';
+  const noun = isSale ? 'venta' : 'compra';
   const o = await api.order(kind, id);
+  const write = can(isSale ? 'sales:write' : 'purchases:write');
+  const canPayEdit = can('payments:write');
+
   const rows = o.items.map((i) =>
     `<tr><td>${esc(i.sku)}</td><td>${esc(i.name)}</td><td>${i.quantity}</td>
      <td>${money(i.unitPrice)}</td><td>${i.taxRate}%</td>
      <td>${money(i.quantity * i.unitPrice * (1 + i.taxRate / 100))}</td></tr>`);
 
+  const payHeads = ['Fecha', 'Monto', 'Método', 'Nota', 'Registró'];
+  if (canPayEdit) payHeads.push('Acciones');
   const paidRows = o.payments.map((p) =>
     `<tr><td>${date(p.paidAt)}</td><td>${money(p.amount)}</td><td>${PAY_METHOD_LABELS[p.method] ?? esc(p.method)}</td>
-     <td>${esc(p.note ?? '—')}</td><td>${esc(p.createdBy ?? '—')}</td></tr>`);
+     <td>${esc(p.note ?? '—')}</td><td>${esc(p.createdBy ?? '—')}</td>
+     ${canPayEdit ? `<td class="row-actions">
+       <button type="button" class="mini" data-pay-edit="${p.id}">Editar</button>
+       <button type="button" class="mini danger" data-pay-del="${p.id}">Borrar</button>
+     </td>` : ''}</tr>`);
 
-  const canPay = can('payments:write') && o.balance > 0;
+  const canPay = canPayEdit && o.balance > 0;
 
   view.innerHTML = `<h2>${isSale ? 'Venta' : 'Compra'} #${o.id}</h2>
     <p class="detail-meta">
@@ -432,6 +775,11 @@ async function orderDetail(kind, id) {
       · ${date(o.createdAt)}
     </p>
 
+    ${write ? `<div class="actions detail-actions">
+      <button type="button" class="ghost" id="edit-order">Editar</button>
+      <button type="button" class="danger" id="del-order">Eliminar</button>
+    </div>` : ''}
+
     <div class="stats">
       <div class="stat"><span>Subtotal (neto)</span><strong>${money(o.subtotal)}</strong></div>
       <div class="stat"><span>IVA</span><strong>${money(o.tax)}</strong></div>
@@ -439,6 +787,16 @@ async function orderDetail(kind, id) {
       <div class="stat"><span>Pagado</span><strong>${money(o.paid)}</strong></div>
       <div class="stat"><span>Saldo</span><strong>${balanceBadge(o.balance)}</strong></div>
     </div>
+
+    ${write ? `<form id="editf" class="order" hidden>
+      <select name="partnerId" id="e-partner" required></select>
+      <div id="e-lines"></div>
+      <div class="actions">
+        <button type="button" class="ghost" id="e-add">Agregar producto</button>
+        <button>Guardar cambios</button>
+        <button type="button" class="ghost" id="e-cancel">Cancelar</button>
+      </div>
+    </form>` : ''}
 
     <h3>Productos</h3>
     ${table(['SKU', 'Producto', 'Cant.', 'Precio neto', 'IVA', 'Importe c/IVA'], rows, 'Sin líneas.')}
@@ -455,8 +813,22 @@ async function orderDetail(kind, id) {
     </form>` : ''}
 
     <h3>Pagos</h3>
-    ${table(['Fecha', 'Monto', 'Método', 'Nota', 'Registró'], paidRows, 'Aún no hay pagos.')}`;
+    ${table(payHeads, paidRows, 'Aún no hay pagos.')}
 
+    ${canPayEdit ? `<form id="pay-edit" class="inline" hidden>
+      <input type="hidden" name="pid" />
+      <input name="amount" type="number" step="0.01" min="0.01" placeholder="Monto" required />
+      <select name="method">
+        <option value="cash">Efectivo</option>
+        <option value="transfer">Transferencia</option>
+        <option value="card">Tarjeta</option>
+      </select>
+      <input name="note" placeholder="Nota (opcional)" />
+      <button>Guardar pago</button>
+      <button type="button" class="ghost" id="pay-edit-cancel">Cancelar</button>
+    </form>` : ''}`;
+
+  /* ---- Pagos: registrar, editar y borrar ---- */
   if (canPay) {
     $('#pay').addEventListener('submit', async (e) => {
       e.preventDefault();
@@ -468,6 +840,96 @@ async function orderDetail(kind, id) {
       } catch (err) { toast(err.message, true); }
     });
   }
+
+  if (canPayEdit) {
+    const payEdit = $('#pay-edit');
+    view.querySelectorAll('[data-pay-edit]').forEach((b) => b.addEventListener('click', () => {
+      const p = o.payments.find((x) => x.id === Number(b.dataset.payEdit));
+      payEdit.hidden = false;
+      payEdit.elements.pid.value = p.id;
+      payEdit.elements.amount.value = p.amount;
+      payEdit.elements.method.value = p.method;
+      payEdit.elements.note.value = p.note ?? '';
+      payEdit.elements.amount.focus();
+    }));
+    $('#pay-edit-cancel').addEventListener('click', () => { payEdit.hidden = true; });
+    payEdit.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = Object.fromEntries(new FormData(payEdit));
+      try {
+        await api.updatePayment(kind, id, f.pid,
+          { amount: Number(f.amount), method: f.method, note: f.note || null });
+        toast('Pago actualizado');
+        render();
+      } catch (err) { toast(err.message, true); }
+    });
+    view.querySelectorAll('[data-pay-del]').forEach((b) => b.addEventListener('click', async () => {
+      if (!confirmDelete('¿Eliminar este pago? El saldo se recalculará.')) return;
+      try { await api.deletePayment(kind, id, b.dataset.payDel); toast('Pago eliminado'); render(); }
+      catch (err) { toast(err.message, true); }
+    }));
+  }
+
+  /* ---- Editar / eliminar la orden ---- */
+  if (!write) return;
+
+  // Rellena el formulario de edición con los datos actuales (una sola vez).
+  const loadEditForm = async (form) => {
+    const [partners, products] = await Promise.all([
+      api.partners(isSale ? 'customer' : 'supplier'),
+      api.products(),
+    ]);
+    const partnerSel = $('#e-partner', form);
+    partnerSel.innerHTML = partners.map((p) => `<option value="${p.id}">${esc(p.name)}</option>`).join('');
+    // Un tercero archivado sigue en la orden: se conserva como opción.
+    if (!partners.some((p) => p.id === o.partnerId))
+      partnerSel.insertAdjacentHTML('afterbegin',
+        `<option value="${o.partnerId}">${esc(o.partner)} (archivado)</option>`);
+    partnerSel.value = o.partnerId;
+
+    // Ídem con productos archivados que siguen en las líneas: mountLineEditor
+    // los agrega como opción para poder conservarlos.
+    mountLineEditor(
+      $('#e-lines', form),
+      $('#e-add', form),
+      o.items,
+      products,
+      (p) => (isSale ? p.price : p.cost),
+    );
+    form.dataset.loaded = '1';
+  };
+
+  $('#edit-order').addEventListener('click', async () => {
+    const form = $('#editf');
+    try {
+      if (!form.dataset.loaded) await loadEditForm(form);
+      form.hidden = false;
+      $('#edit-order').hidden = true;
+      form.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    } catch (err) { toast(err.message, true); }
+  });
+  $('#e-cancel').addEventListener('click', () => {
+    $('#editf').hidden = true;
+    $('#edit-order').hidden = false;
+  });
+  $('#editf').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const items = readLines($('#e-lines'));
+    try {
+      await api.updateOrder(kind, id, { partnerId: $('#e-partner').value, items });
+      toast(`${isSale ? 'Venta' : 'Compra'} actualizada`);
+      render();
+    } catch (err) { toast(err.message, true); }
+  });
+
+  $('#del-order').addEventListener('click', async () => {
+    if (!confirmDelete(`¿Eliminar la ${noun} #${o.id}? Se devolverá el stock y se borrarán sus pagos.`)) return;
+    try {
+      await api.deleteOrder(kind, id);
+      toast(`${isSale ? 'Venta' : 'Compra'} eliminada; el stock se reponió`);
+      location.hash = isSale ? 'ventas' : 'compras';
+    } catch (err) { toast(err.message, true); }
+  });
 }
 
 // Rutas dinámicas: #venta-3 / #compra-3 → detalle.

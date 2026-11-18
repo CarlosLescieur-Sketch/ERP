@@ -30,15 +30,39 @@ export function makeFakeWorld(seed = {}) {
   const round2 = (n) => Math.round(n * 100) / 100;
 
   const products = {
-    findAll: async () => clone(db.products),
+    findAll: async ({ archived = false } = {}) =>
+      clone(db.products.filter((p) => (p.archived ?? false) === archived)),
     findById: async (id) => clone(db.products.find((p) => p.id === Number(id)) ?? null),
     save: async (p) => {
       if (db.products.some((x) => x.sku === p.sku)) {
         throw Object.assign(new Error('duplicate key value violates unique constraint'), { code: '23505' });
       }
-      const row = { id: nextId(db.products), ...clone(p) };
+      const row = { id: nextId(db.products), archived: false, ...clone(p) };
       db.products.push(row);
       return clone(row);
+    },
+    update: async (p) => {
+      const i = db.products.findIndex((x) => x.id === Number(p.id));
+      if (i === -1) return null;
+      if (db.products.some((x) => x.sku === p.sku && x.id !== Number(p.id))) {
+        throw Object.assign(new Error('duplicate key value violates unique constraint'), { code: '23505' });
+      }
+      db.products[i] = { ...db.products[i], ...clone(p) };
+      return clone(db.products[i]);
+    },
+    remove: async (id) => {
+      db.products = db.products.filter((x) => x.id !== Number(id));
+    },
+    setArchived: async (id, archived) => {
+      const p = db.products.find((x) => x.id === Number(id));
+      if (!p) return null;
+      p.archived = archived === true;
+      return clone(p);
+    },
+    inUse: async (id) => {
+      const pid = Number(id);
+      return db.orders.some((o) => (o.items ?? []).some((i) => i.productId === pid))
+        || db.quotes.some((q) => (q.items ?? []).some((i) => i.productId === pid));
     },
     adjustStock: async (id, delta) => {
       const p = db.products.find((x) => x.id === Number(id));
@@ -48,12 +72,33 @@ export function makeFakeWorld(seed = {}) {
   };
 
   const partners = {
-    findAll: async (kind) => clone(db.partners.filter((p) => !kind || p.kind === kind)),
+    findAll: async (kind, { archived = false } = {}) =>
+      clone(db.partners.filter((p) => (!kind || p.kind === kind) && (p.archived ?? false) === archived)),
     findById: async (id) => clone(db.partners.find((p) => p.id === Number(id)) ?? null),
     save: async (p) => {
-      const row = { id: nextId(db.partners), ...clone(p) };
+      const row = { id: nextId(db.partners), archived: false, ...clone(p) };
       db.partners.push(row);
       return clone(row);
+    },
+    update: async (p) => {
+      const i = db.partners.findIndex((x) => x.id === Number(p.id));
+      if (i === -1) return null;
+      db.partners[i] = { ...db.partners[i], ...clone(p) };
+      return clone(db.partners[i]);
+    },
+    remove: async (id) => {
+      db.partners = db.partners.filter((x) => x.id !== Number(id));
+    },
+    setArchived: async (id, archived) => {
+      const p = db.partners.find((x) => x.id === Number(id));
+      if (!p) return null;
+      p.archived = archived === true;
+      return clone(p);
+    },
+    inUse: async (id) => {
+      const pid = Number(id);
+      return db.orders.some((o) => o.partnerId === pid)
+        || db.quotes.some((q) => q.partnerId === pid);
     },
   };
 
@@ -117,6 +162,50 @@ export function makeFakeWorld(seed = {}) {
         paid,
         balance: round2(o.total - paid),
       };
+    },
+
+    /* ---------- Edición y borrado (CRUD completo) ---------- */
+
+    findItems: async (orderId) => {
+      const o = db.orders.find((x) => x.id === Number(orderId));
+      return clone((o?.items ?? []).map((i) => ({
+        productId: i.productId,
+        quantity: i.quantity,
+        unitPrice: i.unitPrice,
+        taxRate: i.taxRate ?? 16,
+      })));
+    },
+    update: async (order) => {
+      const o = db.orders.find((x) => x.id === Number(order.id));
+      if (!o) return null;
+      Object.assign(o, {
+        partnerId: order.partnerId, subtotal: order.subtotal,
+        tax: order.tax, total: order.total,
+      });
+      return { id: o.id, createdAt: o.createdAt };
+    },
+    replaceItems: async (orderId, items) => {
+      const o = db.orders.find((x) => x.id === Number(orderId));
+      if (o) o.items = clone(items);
+    },
+    /** Borra la orden con la misma cascada que la BD (líneas y pagos). */
+    remove: async (id) => {
+      db.orders = db.orders.filter((x) => x.id !== Number(id));
+      db.payments = db.payments.filter((p) => p.orderId !== Number(id));
+    },
+    findPayment: async (id) => {
+      const p = db.payments.find((x) => x.id === Number(id));
+      if (!p) return null;
+      return { id: p.id, orderId: p.orderId, amount: p.amount, method: p.method, note: p.note ?? null };
+    },
+    updatePayment: async (id, payment) => {
+      const p = db.payments.find((x) => x.id === Number(id));
+      if (!p) return null;
+      Object.assign(p, clone(payment));
+      return { id: p.id, paidAt: p.paidAt };
+    },
+    removePayment: async (id) => {
+      db.payments = db.payments.filter((x) => x.id !== Number(id));
     },
   };
 
@@ -183,6 +272,11 @@ export function makeFakeWorld(seed = {}) {
       if (i === -1) throw notFound(`Usuario ${u.id} no existe`);
       db.users[i] = { ...db.users[i], ...clone(u) };
       return clone(db.users[i]);
+    },
+    /** Borra el usuario con la misma cascada que la BD (sesiones). */
+    remove: async (id) => {
+      db.users = db.users.filter((x) => x.id !== Number(id));
+      db.sessions = db.sessions.filter((s) => s.userId !== Number(id));
     },
   };
 
@@ -252,6 +346,21 @@ export function makeFakeWorld(seed = {}) {
       if (convertedOrderId) q.convertedOrderId = convertedOrderId;
       q.updatedAt = new Date().toISOString();
       return clone(q);
+    },
+    /** Cabecera + líneas (como el repositorio Postgres). */
+    update: async (quote) => {
+      const q = db.quotes.find((x) => x.id === Number(quote.id));
+      if (!q) return null;
+      Object.assign(q, {
+        partnerId: quote.partnerId, subtotal: quote.subtotal, tax: quote.tax,
+        total: quote.total, note: quote.note, expiresAt: quote.expiresAt,
+        updatedAt: new Date().toISOString(),
+      });
+      q.items = clone(quote.items);
+      return clone(q);
+    },
+    remove: async (id) => {
+      db.quotes = db.quotes.filter((x) => x.id !== Number(id));
     },
   };
 

@@ -69,33 +69,70 @@ export function createServer(uc, { sessionTtlDays = 7 } = {}) {
   /* ---------- Usuarios (admin) ---------- */
   app.get('/api/users', requirePermission('users:manage'), wrap(() => uc.listUsers()));
   app.post('/api/users', requirePermission('users:manage'), wrap((req) => uc.createUser(req.body, req.user)));
+  app.put('/api/users/:id', requirePermission('users:manage'),
+    wrap((req) => uc.updateUser(req.params.id, req.body, req.user)));
+  app.delete('/api/users/:id', requirePermission('users:manage'),
+    wrap((req) => uc.deleteUser(req.params.id, req.user)));
 
   /* ---------- Negocio (sesión requerida; escritura según rol) ---------- */
   app.get('/api/summary', requireAuth, wrap(() => uc.getSummary()));
   app.get('/api/reports/dashboard', requireAuth,
     wrap((req) => uc.getDashboard({ months: req.query.months })));
 
-  app.get('/api/products', requireAuth, wrap(() => uc.listProducts()));
+  app.get('/api/products', requireAuth, wrap((req) => uc.listProducts({ archived: req.query.archived === '1' })));
   app.post('/api/products', requirePermission('products:write'), wrap((req) => uc.createProduct(req.body)));
+  app.put('/api/products/:id', requirePermission('products:write'),
+    wrap((req) => uc.updateProduct(req.params.id, req.body)));
+  app.delete('/api/products/:id', requirePermission('products:write'),
+    wrap((req) => uc.deleteProduct(req.params.id)));
+  app.post('/api/products/:id/archive', requirePermission('products:write'),
+    wrap((req) => uc.setProductArchived(req.params.id, req.body?.archived)));
 
-  app.get('/api/partners', requireAuth, wrap((req) => uc.listPartners(req.query.kind)));
+  app.get('/api/partners', requireAuth,
+    wrap((req) => uc.listPartners(req.query.kind, { archived: req.query.archived === '1' })));
   app.post('/api/partners', requirePermission('partners:write'), wrap((req) => uc.createPartner(req.body)));
+  app.put('/api/partners/:id', requirePermission('partners:write'),
+    wrap((req) => uc.updatePartner(req.params.id, req.body)));
+  app.delete('/api/partners/:id', requirePermission('partners:write'),
+    wrap((req) => uc.deletePartner(req.params.id)));
+  app.post('/api/partners/:id/archive', requirePermission('partners:write'),
+    wrap((req) => uc.setPartnerArchived(req.params.id, req.body?.archived)));
 
   app.get('/api/purchases', requireAuth, wrap(() => uc.listPurchases()));
   app.post('/api/purchases', requirePermission('purchases:write'), wrap((req) => uc.registerPurchase(req.body)));
   app.get('/api/purchases/:id', requireAuth, wrap((req) => mustOrder(uc.getOrder(req.params.id), 'Compra')));
+  app.put('/api/purchases/:id', requirePermission('purchases:write'),
+    wrap((req) => uc.updatePurchase(req.params.id, req.body)));
+  app.delete('/api/purchases/:id', requirePermission('purchases:write'),
+    wrap((req) => uc.deletePurchase(req.params.id)));
   app.post('/api/purchases/:id/payments', requirePermission('payments:write'),
     wrap((req) => uc.registerPurchasePayment(req.params.id, req.body, req.user)));
+  app.put('/api/purchases/:id/payments/:pid', requirePermission('payments:write'),
+    wrap((req) => uc.updatePurchasePayment(req.params.id, req.params.pid, req.body)));
+  app.delete('/api/purchases/:id/payments/:pid', requirePermission('payments:write'),
+    wrap((req) => uc.deletePurchasePayment(req.params.id, req.params.pid)));
 
   app.get('/api/sales', requireAuth, wrap(() => uc.listSales()));
   app.post('/api/sales', requirePermission('sales:write'), wrap((req) => uc.registerSale(req.body)));
   app.get('/api/sales/:id', requireAuth, wrap((req) => mustOrder(uc.getOrder(req.params.id), 'Venta')));
+  app.put('/api/sales/:id', requirePermission('sales:write'),
+    wrap((req) => uc.updateSale(req.params.id, req.body)));
+  app.delete('/api/sales/:id', requirePermission('sales:write'),
+    wrap((req) => uc.deleteSale(req.params.id)));
   app.post('/api/sales/:id/payments', requirePermission('payments:write'),
     wrap((req) => uc.registerSalePayment(req.params.id, req.body, req.user)));
+  app.put('/api/sales/:id/payments/:pid', requirePermission('payments:write'),
+    wrap((req) => uc.updateSalePayment(req.params.id, req.params.pid, req.body)));
+  app.delete('/api/sales/:id/payments/:pid', requirePermission('payments:write'),
+    wrap((req) => uc.deleteSalePayment(req.params.id, req.params.pid)));
 
   // --- Cotizaciones: lectura para todos; estados y conversión con permiso ---
   app.get('/api/quotes', requireAuth, wrap((req) => uc.listQuotes(req.query.status ?? null)));
   app.post('/api/quotes', requirePermission('quotes:write'), wrap((req) => uc.createQuote(req.body, req.user)));
+  app.put('/api/quotes/:id', requirePermission('quotes:write'),
+    wrap((req) => uc.updateQuote(req.params.id, req.body)));
+  app.delete('/api/quotes/:id', requirePermission('quotes:write'),
+    wrap((req) => uc.deleteQuote(req.params.id)));
   app.get('/api/quotes/:id', requireAuth, wrap(async (req) => {
     const q = await uc.getQuote(req.params.id);
     if (!q) throw new NotFoundError('La cotización inexistente');
@@ -113,6 +150,9 @@ export function createServer(uc, { sessionTtlDays = 7 } = {}) {
     if (err instanceof ForbiddenError) return res.status(403).json({ error: err.message });
     if (err instanceof NotFoundError) return res.status(404).json({ error: err.message });
     if (err.code === '23505') return res.status(409).json({ error: 'Ya existe un registro con ese valor único (¿SKU o correo repetido?)' });
+    // Llave foránea: el registro está en uso (por si acaso falla una
+    // comprobación previa de "inUse", que es quien decide archivar).
+    if (err.code === '23503') return res.status(409).json({ error: 'No se puede eliminar: el registro está en uso por otros datos del sistema' });
     console.error(err);
     res.status(500).json({ error: 'Error interno del servidor' });
   });
